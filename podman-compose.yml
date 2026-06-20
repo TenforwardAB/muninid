@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  muninid:
+    build:
+      context: ..
+      dockerfile: muninid/Containerfile
+    container_name: muninid
+    env_file:
+      - .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:-postgresql://api_user:2U8pwtA9xm@idpdb:5432/idp}
+      VALKEY_URL: ${VALKEY_URL:-redis://idp-valkey:6379}
+      OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8080}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-false}
+    command: >
+      sh -c 'if [ "$$RUN_MIGRATIONS" = "true" ]; then
+        /app/muninid-migrate -dir /app/migrations up;
+      fi;
+      exec /app/muninid'
+    ports:
+      - "${MUNINID_HTTP_PORT:-8080}:8080"
+    networks:
+      - muninid
+    restart: unless-stopped
+
+networks:
+  muninid:
+    external: true
+    name: muninid_default

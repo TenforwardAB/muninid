@@ -1,0 +1,9 @@
+.git
+.codex
+.agents
+tmp
+dist
+node_modules
+coverage
+*.log
+podman-compose.yml
