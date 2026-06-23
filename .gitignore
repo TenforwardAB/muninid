@@ -52,6 +52,11 @@ Thumbs.db
 # Compiled binary with project name (optional but common)
 go53
 
+# Secrets / local environment (never commit — keep .env.example tracked)
+.env
+.env.*
+!.env.example
+
 # Custom dev data
 staged/
 data/

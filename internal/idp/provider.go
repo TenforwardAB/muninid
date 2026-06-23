@@ -191,16 +191,126 @@ func (p *Provider) loadSigningKey(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	block, _ := pem.Decode([]byte(privatePEM))
-	if block == nil {
-		return errors.New("invalid private key pem")
-	}
-	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	key, err := parseRSAPrivateKey(privatePEM)
 	if err != nil {
 		return err
 	}
 	p.key, p.keyID = key, keys[0].KeyID
 	return nil
+}
+
+func parseRSAPrivateKey(value string) (*rsa.PrivateKey, error) {
+	normalized := strings.ReplaceAll(value, `\n`, "\n")
+	normalized = strings.ReplaceAll(normalized, `\r`, "\r")
+	normalized = strings.ReplaceAll(normalized, "------BEGIN ", "-----BEGIN ")
+	normalized = strings.ReplaceAll(normalized, "------END ", "-----END ")
+	block, _ := pem.Decode([]byte(normalized))
+	if block == nil {
+		key, err := parseRSAJWKPrivateKey([]byte(value))
+		if err != nil {
+			return nil, errors.New("invalid private key pem or jwk")
+		}
+		return key, nil
+	}
+	return parseRSAPrivateKeyDER(block.Bytes)
+}
+
+func parseRSAPrivateKeyDER(der []byte) (*rsa.PrivateKey, error) {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, err
+	}
+	key, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("private key is not RSA")
+	}
+	return key, nil
+}
+
+func parseRSAJWKPrivateKey(data []byte) (*rsa.PrivateKey, error) {
+	var jwk struct {
+		Kty string `json:"kty"`
+		N   string `json:"n"`
+		E   string `json:"e"`
+		D   string `json:"d"`
+		P   string `json:"p"`
+		Q   string `json:"q"`
+		DP  string `json:"dp"`
+		DQ  string `json:"dq"`
+		QI  string `json:"qi"`
+	}
+	if err := json.Unmarshal(data, &jwk); err != nil {
+		return nil, err
+	}
+	if jwk.Kty != "RSA" {
+		return nil, errors.New("private key is not RSA")
+	}
+	n, err := jwkBigInt(jwk.N)
+	if err != nil {
+		return nil, err
+	}
+	e, err := jwkInt(jwk.E)
+	if err != nil {
+		return nil, err
+	}
+	d, err := jwkBigInt(jwk.D)
+	if err != nil {
+		return nil, err
+	}
+	p, err := jwkBigInt(jwk.P)
+	if err != nil {
+		return nil, err
+	}
+	q, err := jwkBigInt(jwk.Q)
+	if err != nil {
+		return nil, err
+	}
+	key := &rsa.PrivateKey{
+		PublicKey: rsa.PublicKey{N: n, E: e},
+		D:         d,
+		Primes:    []*big.Int{p, q},
+	}
+	if jwk.DP != "" && jwk.DQ != "" && jwk.QI != "" {
+		dp, err := jwkBigInt(jwk.DP)
+		if err != nil {
+			return nil, err
+		}
+		dq, err := jwkBigInt(jwk.DQ)
+		if err != nil {
+			return nil, err
+		}
+		qi, err := jwkBigInt(jwk.QI)
+		if err != nil {
+			return nil, err
+		}
+		key.Precomputed.Dp = dp
+		key.Precomputed.Dq = dq
+		key.Precomputed.Qinv = qi
+	}
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	key.Precompute()
+	return key, nil
+}
+
+func jwkBigInt(value string) (*big.Int, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return nil, err
+	}
+	return new(big.Int).SetBytes(decoded), nil
+}
+
+func jwkInt(value string) (int, error) {
+	decoded, err := jwkBigInt(value)
+	if err != nil {
+		return 0, err
+	}
+	return int(decoded.Int64()), nil
 }
 
 func (p *Provider) Discovery(w http.ResponseWriter, r *http.Request) {
@@ -294,25 +404,48 @@ func (p *Provider) Authorize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Provider) FinishLogin(ctx context.Context, uid, username, password, ip, userAgent string) (string, error) {
+	// Brute-force lockout thresholds. The per-IP+username counter stops targeted
+	// guessing from a single source; the per-username counter adds protection
+	// against distributed / credential-stuffing attempts spread across many IPs.
+	const (
+		ipLockAfter   = 5
+		ipLockFor     = 15 * time.Minute
+		userLockAfter = 20
+		userLockFor   = 15 * time.Minute
+	)
+
 	artifact, err := p.store.GetArtifact(ctx, interactionName, uid)
 	if err != nil {
 		return "", err
 	}
 	_ = artifact
-	key := strings.ToLower(username) + "|" + ip
-	if locked, _, err := p.store.LoginLocked(ctx, key); err != nil {
-		return "", err
-	} else if locked {
-		return "", errors.New("locked")
+
+	uname := strings.ToLower(username)
+	ipKey := uname + "|" + ip  // targeted brute force from a single source
+	userKey := "user|" + uname // distributed brute force across many IPs
+
+	// Check both lockouts before talking to the auth backend.
+	for _, lk := range []string{ipKey, userKey} {
+		if locked, _, err := p.store.LoginLocked(ctx, lk); err != nil {
+			return "", err
+		} else if locked {
+			return "", errors.New("locked")
+		}
 	}
+
+	recordFailure := func() {
+		_ = p.store.RecordLoginFailure(ctx, ipKey, "user_ip", ipLockAfter, ipLockFor)
+		_ = p.store.RecordLoginFailure(ctx, userKey, "user", userLockAfter, userLockFor)
+	}
+
 	auth, err := p.wd.Authentication.Authenticate(ctx, username, password, wildduck.M{"scope": "master"})
 	if err != nil || auth["success"] != true {
-		_ = p.store.RecordLoginFailure(ctx, key, "user_ip", 5, 15*time.Minute)
+		recordFailure()
 		return "", errors.New("invalid credentials")
 	}
 	userID, _ := auth["id"].(string)
 	if userID == "" {
-		_ = p.store.RecordLoginFailure(ctx, key, "user_ip", 5, 15*time.Minute)
+		recordFailure()
 		return "", errors.New("invalid credentials")
 	}
 	account, err := p.FetchAccount(ctx, userID)
@@ -320,10 +453,11 @@ func (p *Provider) FinishLogin(ctx context.Context, uid, username, password, ip,
 		return "", err
 	}
 	if !account.Activated || account.Suspended || account.Disabled {
-		_ = p.store.RecordLoginFailure(ctx, key, "user_ip", 5, 15*time.Minute)
+		recordFailure()
 		return "", errors.New("invalid credentials")
 	}
-	_ = p.store.ResetLoginFailures(ctx, key)
+	_ = p.store.ResetLoginFailures(ctx, ipKey)
+	_ = p.store.ResetLoginFailures(ctx, userKey)
 	sessionID := randomID(32)
 	_ = p.store.PutArtifact(ctx, sessionName, sessionID, map[string]any{"sub": account.ID, "email": account.Email}, 24*time.Hour)
 	return sessionID, nil
