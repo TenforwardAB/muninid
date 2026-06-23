@@ -13,4 +13,4 @@ This directory contains license texts for direct external dependencies used by M
 | `github.com/pkg/errors` | `v0.9.1` | BSD-2-Clause | `github.com_pkg_errors@v0.9.1.BSD-2-Clause.txt` |
 | `github.com/pressly/goose/v3` | `v3.24.3` | MIT | `github.com_pressly_goose_v3@v3.24.3.MIT.txt` |
 | `github.com/redis/go-redis/v9` | `v9.7.3` | BSD-2-Clause | `github.com_redis_go-redis_v9@v9.7.3.BSD-2-Clause.txt` |
-| `github.com/tenforwardab/wildduck-gosdk` | `v0.0.0` (`replace ../wildduck-gosdk`) | EUPL-1.2 | `github.com_tenforwardab_wildduck-gosdk@v0.0.0.EUPL-1.2.txt` |
+| `github.com/tenforwardab/wildduck-gosdk` | `v0.99.0` | EUPL-1.2 | `github.com_tenforwardab_wildduck-gosdk@v0.0.0.EUPL-1.2.txt` |

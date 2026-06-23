@@ -8,7 +8,7 @@ The current implementation uses:
 - PostgreSQL through `pgx`.
 - Goose SQL migrations through a separate migration command.
 - The existing MuninID database tables where possible.
-- The local `github.com/tenforwardab/wildduck-gosdk` module through a `replace ../wildduck-gosdk`.
+- `github.com/tenforwardab/wildduck-gosdk` from its tagged Go module release.
 - The same `enc:v1` AES-256-GCM secret format as the Node IDP.
 - RS256 JWT access/id tokens and JWKS.
 - A Fosite dependency is included for the OAuth/OIDC migration path, but this first base keeps the endpoint behavior explicit instead of hiding it behind a large storage adapter.

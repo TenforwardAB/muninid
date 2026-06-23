@@ -12,7 +12,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/pressly/goose/v3 v3.24.3
 	github.com/redis/go-redis/v9 v9.7.3
-	github.com/tenforwardab/wildduck-gosdk v0.0.0
+	github.com/tenforwardab/wildduck-gosdk v0.99.0
 )
 
 require (
@@ -93,5 +93,3 @@ require (
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/tenforwardab/wildduck-gosdk => ../wildduck-gosdk

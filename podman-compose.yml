@@ -3,8 +3,8 @@ version: "3.9"
 services:
   muninid:
     build:
-      context: ..
-      dockerfile: muninid/Containerfile
+      context: .
+      dockerfile: Containerfile
     container_name: muninid
     env_file:
       - .env
@@ -12,7 +12,7 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       DATABASE_URL: ${DATABASE_URL:-postgresql://api_user:2U8pwtA9xm@idpdb:5432/idp}
-      VALKEY_URL: ${VALKEY_URL:-redis://idp-valkey:6379}
+      VALKEY_URL: ${VALKEY_URL:-redis://valkey:6379}
       OIDC_ISSUER: ${OIDC_ISSUER:-http://localhost:8080}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-false}
     command: >
@@ -29,4 +29,4 @@ services:
 networks:
   muninid:
     external: true
-    name: muninid_default
+    name: solutrix-idp_default
