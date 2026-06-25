@@ -19,6 +19,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -29,17 +30,44 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/tenforwardab/muninid/internal/idp"
+	"github.com/tenforwardab/muninid/internal/authz"
 	"github.com/tenforwardab/muninid/internal/store"
 )
 
-type Admin struct {
-	idp   *idp.Provider
-	store *store.Store
+// clientStore is the persistence surface the Admin handlers depend on. It is
+// satisfied by *store.Store; defining it as an interface keeps handlers testable
+// without a database.
+type clientStore interface {
+	ListClients(ctx context.Context, customerID *string) ([]store.Client, error)
+	GetClientByID(ctx context.Context, id string) (store.Client, error)
+	CreateClient(ctx context.Context, c store.Client) (store.Client, error)
+	UpdateClient(ctx context.Context, c store.Client) error
+	DeleteClient(ctx context.Context, id string) error
+	ListServiceProviders(ctx context.Context) ([]store.SAMLServiceProvider, error)
+	GetServiceProvider(ctx context.Context, id string) (store.SAMLServiceProvider, error)
+	CreateServiceProvider(ctx context.Context, provider store.SAMLServiceProvider) (store.SAMLServiceProvider, error)
+	UpdateServiceProvider(ctx context.Context, provider store.SAMLServiceProvider) error
+	DeleteServiceProvider(ctx context.Context, id string) error
+	ListPolicies(ctx context.Context) ([]store.IdentityPolicy, error)
+	GetPolicy(ctx context.Context, id string) (store.IdentityPolicy, error)
+	CreatePolicy(ctx context.Context, policy store.IdentityPolicy) (store.IdentityPolicy, error)
+	UpdatePolicy(ctx context.Context, policy store.IdentityPolicy) error
+	DeletePolicy(ctx context.Context, id string) error
 }
 
-func NewAdmin(provider *idp.Provider, st *store.Store) *Admin {
-	return &Admin{idp: provider, store: st}
+// secretEncryptor encrypts client secrets. Satisfied by *idp.Provider.
+type secretEncryptor interface {
+	EncryptSecret(value string) (string, error)
+}
+
+type Admin struct {
+	idp   secretEncryptor
+	store clientStore
+	authz authz.Authorizer
+}
+
+func NewAdmin(provider secretEncryptor, st clientStore, authorizer authz.Authorizer) *Admin {
+	return &Admin{idp: provider, store: st, authz: authorizer}
 }
 
 func (h *Admin) GlobalRoutes(r chi.Router) {
@@ -419,6 +447,8 @@ type clientRequest struct {
 	PostLogoutRedirectURIs []string `json:"post_logout_redirect_uris"`
 	PostLogoutRedirectUris []string `json:"postLogoutRedirectUris"`
 	RotateSecret           bool     `json:"rotate_secret"`
+	CustomerID             *string  `json:"customer_id"`
+	CustomerIDCamel        *string  `json:"customerId"`
 }
 
 type serviceProviderRequest struct {

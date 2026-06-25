@@ -18,7 +18,11 @@
 
 package handlers
 
-import "context"
+import (
+	"context"
+
+	"github.com/tenforwardab/muninid/internal/authz"
+)
 
 type adminClaimsKey struct{}
 
@@ -29,4 +33,17 @@ func WithAdminClaims(ctx context.Context, claims map[string]any) context.Context
 func AdminClaims(ctx context.Context) map[string]any {
 	claims, _ := ctx.Value(adminClaimsKey{}).(map[string]any)
 	return claims
+}
+
+type subjectKey struct{}
+
+// WithSubject stores the authenticated authz.Subject for self-service routes.
+func WithSubject(ctx context.Context, sub authz.Subject) context.Context {
+	return context.WithValue(ctx, subjectKey{}, sub)
+}
+
+// SubjectFromContext returns the authenticated subject and whether one was set.
+func SubjectFromContext(ctx context.Context) (authz.Subject, bool) {
+	sub, ok := ctx.Value(subjectKey{}).(authz.Subject)
+	return sub, ok
 }

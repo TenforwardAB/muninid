@@ -48,6 +48,16 @@ type Config struct {
 	IDTokenTTL            time.Duration
 	CodeTTL               time.Duration
 	RefreshTokenTTL       time.Duration
+
+	// Authorization (PDP) backend. See docs/authz-contract.md.
+	AuthzBackend         string // "claims" (default) | "solutrix"
+	AuthzAdminRoles      []string
+	AuthzCacheTTL        time.Duration
+	SolutrixAPIBaseURL   string
+	SolutrixTokenURL     string
+	SolutrixClientID     string
+	SolutrixClientSecret string
+	SolutrixScope        string
 }
 
 func Load() (Config, error) {
@@ -69,6 +79,14 @@ func Load() (Config, error) {
 		IDTokenTTL:            10 * time.Minute,
 		CodeTTL:               5 * time.Minute,
 		RefreshTokenTTL:       30 * 24 * time.Hour,
+		AuthzBackend:          env("AUTHZ_BACKEND", "claims"),
+		AuthzAdminRoles:       splitCSV(env("AUTHZ_ADMIN_ROLES", "idp_admin,admin,superadmin")),
+		AuthzCacheTTL:         parseDuration(os.Getenv("AUTHZ_CACHE_TTL"), 30*time.Second),
+		SolutrixAPIBaseURL:    os.Getenv("SOLUTRIX_API_BASE_URL"),
+		SolutrixTokenURL:      firstEnv("SOLUTRIX_TOKEN_URL", "OIDC_TOKEN_URL"),
+		SolutrixClientID:      os.Getenv("SOLUTRIX_CLIENT_ID"),
+		SolutrixClientSecret:  os.Getenv("SOLUTRIX_CLIENT_SECRET"),
+		SolutrixScope:         os.Getenv("SOLUTRIX_SCOPE"),
 	}
 	cfg.CORSOrigins = splitCSV(os.Getenv("CORS_ORIGINS"))
 	cfg.CookieKeys = splitCSV(os.Getenv("OIDC_COOKIE_KEYS"))
@@ -103,6 +121,16 @@ func (c Config) HTTPAddr() string {
 func env(key, fallback string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return fallback
+}
+
+func parseDuration(value string, fallback time.Duration) time.Duration {
+	if value == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(value); err == nil {
+		return d
 	}
 	return fallback
 }

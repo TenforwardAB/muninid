@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	wildduck "github.com/tenforwardab/wildduck-gosdk"
 
+	"github.com/tenforwardab/muninid/internal/authz"
 	"github.com/tenforwardab/muninid/internal/config"
 	"github.com/tenforwardab/muninid/internal/fositestore"
 	"github.com/tenforwardab/muninid/internal/handlers"
@@ -48,6 +49,7 @@ type App struct {
 	kv    *kv.Client
 	idp   *idp.Provider
 	store *store.Store
+	authz authz.Authorizer
 }
 
 func New(ctx context.Context, cfg config.Config) (*App, error) {
@@ -81,7 +83,25 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 		return nil, err
 	}
 
-	return &App{cfg: cfg, db: db, kv: cache, idp: provider, store: st}, nil
+	authorizer, err := authz.New(authz.Config{
+		Backend:    cfg.AuthzBackend,
+		AdminRoles: cfg.AuthzAdminRoles,
+		Solutrix: authz.SolutrixConfig{
+			BaseURL:      cfg.SolutrixAPIBaseURL,
+			TokenURL:     cfg.SolutrixTokenURL,
+			ClientID:     cfg.SolutrixClientID,
+			ClientSecret: cfg.SolutrixClientSecret,
+			Scope:        cfg.SolutrixScope,
+			CacheTTL:     cfg.AuthzCacheTTL,
+		},
+	})
+	if err != nil {
+		_ = cache.Close()
+		db.Close()
+		return nil, err
+	}
+
+	return &App{cfg: cfg, db: db, kv: cache, idp: provider, store: st, authz: authorizer}, nil
 }
 
 func (a *App) Close() {
@@ -108,7 +128,7 @@ func (a *App) Router() http.Handler {
 	}))
 
 	auth := handlers.NewAuth(a.idp)
-	admin := handlers.NewAdmin(a.idp, a.store)
+	admin := handlers.NewAdmin(a.idp, a.store, a.authz)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -142,6 +162,10 @@ func (a *App) Router() http.Handler {
 	r.Route("/api/admin", func(r chi.Router) {
 		r.Use(a.requireBearerAdmin)
 		admin.TenantRoutes(r)
+	})
+	r.Route("/api/self", func(r chi.Router) {
+		r.Use(a.requireIdentity)
+		admin.SelfClientRoutes(r)
 	})
 
 	if a.cfg.EnableGUI {
@@ -190,6 +214,25 @@ func (a *App) requireBearerAdmin(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(handlers.WithAdminClaims(r.Context(), claims)))
+	})
+}
+
+// requireIdentity verifies the bearer token and stores the resolved subject in
+// context for self-service routes. Unlike requireBearerAdmin it does not require
+// a privileged role; authorization is delegated to the Authorizer per request.
+func (a *App) requireIdentity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if token == "" {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "bearer_token_required"})
+			return
+		}
+		claims, err := a.idp.VerifyAccessToken(r.Context(), token)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(handlers.WithSubject(r.Context(), authz.SubjectFromClaims(claims))))
 	})
 }
 
