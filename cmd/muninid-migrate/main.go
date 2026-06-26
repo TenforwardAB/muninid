@@ -51,7 +51,10 @@ func main() {
 	goose.SetBaseFS(nil)
 	goose.SetDialect("postgres")
 
-	args := flag.Args()[1:]
+	var args []string
+	if flag.NArg() > 1 {
+		args = flag.Args()[1:]
+	}
 	if err := goose.Run(command, db, *dir, args...); err != nil {
 		log.Fatal(err)
 	}
