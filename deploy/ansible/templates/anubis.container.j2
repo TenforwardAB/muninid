@@ -1,0 +1,20 @@
+[Unit]
+Description=Anubis bot-wall in front of MuninID /interaction
+Requires=muninid-pod.service
+After=muninid-pod.service muninid.service
+
+[Container]
+Image={{ anubis_image }}
+Pod=muninid.pod
+Environment=BIND=:{{ anubis_port }}
+Environment=TARGET=http://localhost:{{ muninid_port }}
+Environment=POLICY_FNAME=/data/cfg/botPolicies.yaml
+Environment=DIFFICULTY={{ anubis_difficulty }}
+Environment=SERVE_ROBOTS_TXT=true
+Volume=%h/.config/anubis/botPolicies.yaml:/data/cfg/botPolicies.yaml:ro,Z
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

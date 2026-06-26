@@ -1,0 +1,67 @@
+#--- Managed by Ansible (muninid edge) — do not edit by hand ---
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    maxconn 2048
+    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+    tune.ssl.default-dh-param 2048
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+    timeout http-request 10s
+
+#--- :80  ACME http-01 + redirect to https ---
+frontend fe_http
+    bind :80
+    acl is_acme path_beg /.well-known/acme-challenge/
+    use_backend be_acme if is_acme
+    http-request redirect scheme https code 301 unless is_acme
+
+#--- :443  TLS edge ---
+frontend fe_https
+    bind :443 ssl crt /etc/haproxy/certs/ alpn h2,http/1.1
+    http-request set-header X-Forwarded-Proto https
+    # Authoritative client IP: overwrite any client-supplied value (anti-spoof).
+    # Rootless podman NATs the backend connection to the host IP, so Anubis/muninid
+    # must trust these headers, not RemoteAddr. Anubis reads X-Real-IP by default;
+    # muninid's chi RealIP reads X-Real-IP then X-Forwarded-For.
+    http-request set-header X-Forwarded-For %[src]
+    http-request set-header X-Real-IP %[src]
+
+    # ---- per-source-IP rate limiting (10s sliding window) ----
+    stick-table type ip size 100k expire 10s store http_req_rate(10s)
+    http-request track-sc0 src
+    acl rl_over_global sc_http_req_rate(0) gt {{ rl_global_per_10s }}
+    acl is_interaction path_beg /interaction
+    acl rl_over_login  sc_http_req_rate(0) gt {{ rl_interaction_per_10s }}
+    http-request deny deny_status 429 if rl_over_global
+    http-request deny deny_status 429 if is_interaction rl_over_login
+
+    # ---- host routing ----
+    acl host_idp  hdr(host) -i {{ idp_domain }}
+    acl host_demo hdr(host) -i {{ demo_domain }}
+    use_backend be_anubis if host_idp
+    use_backend be_demo   if host_demo
+
+backend be_acme
+    server certbot 127.0.0.1:{{ acme_http01_port }}
+
+# All idp.solutrix.io traffic flows through Anubis; its policy only challenges
+# /interaction and lets every other path (OAuth/OIDC/API) straight through to
+# muninid. Health check hits /healthz, which the policy allows.
+backend be_anubis
+    option httpchk GET /healthz
+    server anubis 127.0.0.1:{{ anubis_port }} check
+
+backend be_demo
+    # go53-webadmin (Node) returns 400 to HTTP/1.0 checks without a Host header.
+    option httpchk
+    http-check send meth GET uri /login ver HTTP/1.1 hdr Host {{ demo_domain }}
+    http-check expect status 200
+    server demo 127.0.0.1:{{ demo_webadmin_port }} check

@@ -1,0 +1,15 @@
+#!/bin/bash
+# Managed by Ansible. Runs after every successful certbot issue/renew: rebuilds
+# the combined PEMs HAProxy loads from /etc/haproxy/certs and reloads HAProxy.
+set -euo pipefail
+
+mkdir -p /etc/haproxy/certs
+for d in /etc/letsencrypt/live/*/; do
+    [ -e "${d}fullchain.pem" ] || continue
+    domain="$(basename "$d")"
+    cat "${d}fullchain.pem" "${d}privkey.pem" > "/etc/haproxy/certs/${domain}.pem.tmp"
+    mv "/etc/haproxy/certs/${domain}.pem.tmp" "/etc/haproxy/certs/${domain}.pem"
+    chmod 600 "/etc/haproxy/certs/${domain}.pem"
+done
+
+systemctl reload haproxy || true

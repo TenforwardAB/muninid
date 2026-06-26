@@ -1,0 +1,308 @@
+---
+# Edge deploy for the small demo/QA box (172.31.0.12):
+#   * rootless podman user `podman_munin` (subuid/subgid + lingering)
+#   * muninid + Anubis as a rootless quadlet pod (managed UpCloud PG/Valkey)
+#   * HAProxy edge: TLS for idp.solutrix.io + demo.go53.eu, rate limiting
+#   * Anubis (mild) only challenges /interaction
+#   * certbot (HTTP-01 via HAProxy) + auto-renew deploy hook
+#   * go53 demo via /root/install_demo.sh with SKIP_CADDY=1 (HAProxy fronts it)
+#
+# Run:  ansible-playbook -i inventory.ini playbook.yml
+# Tags: certs | haproxy | muninid | demo
+- name: Deploy MuninID edge (rootless) + HAProxy + Anubis + go53 demo
+  hosts: idp_demo
+  become: true
+  vars_files:
+    - vars/main.yml
+    - vars/secrets.yml
+
+  handlers:
+    - name: run cert deploy hook
+      ansible.builtin.command: /etc/letsencrypt/renewal-hooks/deploy/haproxy.sh
+      changed_when: true
+
+    - name: reload haproxy
+      ansible.builtin.systemd_service:
+        name: haproxy
+        state: reloaded
+
+  tasks:
+    # ------------------------------------------------------------- packages
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - haproxy
+          - certbot
+          - podman
+          - dbus-user-session
+          - openssl
+          - acl
+        update_cache: true
+        state: present
+
+    # ----------------------------------------------- persistent muninid keys
+    # Generated once on the control node and reused on every run so rotating
+    # them (which would invalidate sessions/encrypted secrets) is deliberate.
+    # Prefer keys supplied in secrets.yml (so we can match an existing instance and
+    # keep moved/encrypted data decryptable); otherwise generate + persist new ones.
+    - name: Resolve muninid secrets (control node)
+      ansible.builtin.set_fact:
+        muninid_cookie_key: "{{ muninid_cookie_key | default(lookup('password', 'vars/generated/' ~ inventory_hostname ~ '_cookie_key chars=ascii_letters,digits length=48')) }}"
+        muninid_secret_key: "{{ muninid_secret_key | default(lookup('password', 'vars/generated/' ~ inventory_hostname ~ '_secret_key chars=ascii_letters,digits length=48')) }}"
+      delegate_to: localhost
+      become: false
+      tags: [muninid, certs, haproxy]
+
+    # ---------------------------------------------------- HAProxy + certs ---
+    - name: Ensure HAProxy certs directory
+      ansible.builtin.file:
+        path: /etc/haproxy/certs
+        state: directory
+        mode: "0750"
+      tags: [haproxy, certs]
+
+    - name: Bootstrap self-signed cert so HAProxy can bind :443 before LE issues
+      ansible.builtin.shell: |
+        set -e
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+          -keyout /tmp/bootstrap.key -out /tmp/bootstrap.crt -subj "/CN=bootstrap"
+        cat /tmp/bootstrap.crt /tmp/bootstrap.key > /etc/haproxy/certs/zzz-bootstrap.pem
+        chmod 600 /etc/haproxy/certs/zzz-bootstrap.pem
+        rm -f /tmp/bootstrap.key /tmp/bootstrap.crt
+      args:
+        creates: /etc/haproxy/certs/zzz-bootstrap.pem
+      tags: [haproxy, certs]
+
+    - name: Deploy HAProxy config (validated before reload)
+      ansible.builtin.template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        mode: "0644"
+        validate: "haproxy -c -f %s"
+      notify: reload haproxy
+      tags: [haproxy]
+
+    - name: Enable and start HAProxy
+      ansible.builtin.systemd_service:
+        name: haproxy
+        enabled: true
+        state: started
+      tags: [haproxy]
+
+    # Deterministically load the deployed config now — certbot below relies on the
+    # :80 ACME backend being live, so we cannot defer this to an end-of-play handler.
+    - name: Reload HAProxy to apply the deployed config
+      ansible.builtin.systemd_service:
+        name: haproxy
+        state: reloaded
+      tags: [haproxy, certs]
+
+    - name: Ensure certbot deploy-hook directory exists
+      ansible.builtin.file:
+        path: /etc/letsencrypt/renewal-hooks/deploy
+        state: directory
+        mode: "0755"
+      tags: [certs]
+
+    - name: Install certbot HAProxy deploy hook
+      ansible.builtin.template:
+        src: templates/certbot-deploy-haproxy.sh.j2
+        dest: /etc/letsencrypt/renewal-hooks/deploy/haproxy.sh
+        mode: "0755"
+      tags: [certs]
+
+    - name: Obtain/renew certificates (HTTP-01 proxied through HAProxy)
+      ansible.builtin.command:
+        cmd: >
+          certbot certonly --standalone --http-01-port {{ acme_http01_port }}
+          --non-interactive --agree-tos -m {{ letsencrypt_email }}
+          --keep-until-expiring --cert-name {{ item }} -d {{ item }}
+        creates: "/etc/letsencrypt/live/{{ item }}/fullchain.pem"
+      loop:
+        - "{{ demo_domain }}"
+        - "{{ idp_domain }}"
+      register: certbot_result
+      failed_when: false
+      notify: run cert deploy hook
+      tags: [certs]
+
+    - name: Report any cert that failed to issue
+      ansible.builtin.debug:
+        msg: >-
+          Cert for {{ item.item }} not issued (rc={{ item.rc }}). Ensure the name
+          resolves to {{ public_ip }} and port 80 is reachable, then re-run with
+          --tags certs.
+      loop: "{{ certbot_result.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.rc is defined and item.rc != 0
+      tags: [certs]
+
+    # Deterministic (not a deferred handler): assemble the combined PEMs HAProxy
+    # loads and reload it, so a later task failing never leaves the bootstrap cert.
+    - name: Assemble HAProxy PEMs from issued certs and reload
+      ansible.builtin.command: /etc/letsencrypt/renewal-hooks/deploy/haproxy.sh
+      changed_when: false
+      tags: [certs]
+
+    # --------------------------------------------- rootless podman_munin ----
+    - name: Create {{ munin_user }} user
+      ansible.builtin.user:
+        name: "{{ munin_user }}"
+        home: "{{ munin_home }}"
+        shell: /bin/bash
+        create_home: true
+      tags: [muninid]
+
+    - name: Resolve {{ munin_user }} uid
+      ansible.builtin.command: "id -u {{ munin_user }}"
+      register: munin_uid_cmd
+      changed_when: false
+      tags: [muninid]
+
+    - name: Set munin_uid fact
+      ansible.builtin.set_fact:
+        munin_uid: "{{ munin_uid_cmd.stdout }}"
+      tags: [muninid]
+
+    - name: Configure subuid range
+      ansible.builtin.lineinfile:
+        path: /etc/subuid
+        regexp: "^{{ munin_user }}:"
+        line: "{{ munin_user }}:{{ munin_subid_start }}:{{ munin_subid_count }}"
+        create: true
+      tags: [muninid]
+
+    - name: Configure subgid range
+      ansible.builtin.lineinfile:
+        path: /etc/subgid
+        regexp: "^{{ munin_user }}:"
+        line: "{{ munin_user }}:{{ munin_subid_start }}:{{ munin_subid_count }}"
+        create: true
+      tags: [muninid]
+
+    - name: Enable lingering for {{ munin_user }} (user services survive logout/boot)
+      ansible.builtin.command: "loginctl enable-linger {{ munin_user }}"
+      args:
+        creates: "/var/lib/systemd/linger/{{ munin_user }}"
+      tags: [muninid]
+
+    - name: Ensure the user systemd instance is running (avoids --user race)
+      ansible.builtin.command: "systemctl start user@{{ munin_uid }}.service"
+      changed_when: false
+      tags: [muninid]
+
+    - name: Wait for the user runtime dir
+      ansible.builtin.wait_for:
+        path: "/run/user/{{ munin_uid }}/systemd/private"
+        timeout: 30
+      tags: [muninid]
+
+    - name: Create rootless config directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ munin_user }}"
+        group: "{{ munin_user }}"
+        mode: "0700"
+      loop:
+        - "{{ munin_home }}/.config/containers/systemd"
+        - "{{ munin_home }}/.config/muninid"
+        - "{{ munin_home }}/.config/anubis"
+      tags: [muninid]
+
+    - name: Log in to ghcr.io (rootless) when credentials are provided
+      become_user: "{{ munin_user }}"
+      ansible.builtin.command:
+        cmd: "podman login ghcr.io -u {{ ghcr_username }} --password-stdin"
+        stdin: "{{ ghcr_token }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ munin_uid }}"
+      when: ghcr_token | length > 0
+      no_log: true
+      tags: [muninid]
+
+    - name: Write muninid env file
+      ansible.builtin.template:
+        src: templates/muninid.env.j2
+        dest: "{{ munin_home }}/.config/muninid/muninid.env"
+        owner: "{{ munin_user }}"
+        group: "{{ munin_user }}"
+        mode: "0600"
+      tags: [muninid]
+
+    - name: Write Anubis policy
+      ansible.builtin.template:
+        src: templates/botPolicies.yaml.j2
+        dest: "{{ munin_home }}/.config/anubis/botPolicies.yaml"
+        owner: "{{ munin_user }}"
+        group: "{{ munin_user }}"
+        mode: "0644"
+      tags: [muninid]
+
+    - name: Write quadlet units
+      ansible.builtin.template:
+        src: "templates/{{ item }}.j2"
+        dest: "{{ munin_home }}/.config/containers/systemd/{{ item }}"
+        owner: "{{ munin_user }}"
+        group: "{{ munin_user }}"
+        mode: "0644"
+      loop:
+        - muninid.pod
+        - muninid.container
+        - anubis.container
+      tags: [muninid]
+
+    # Skip with -e run_migrate=false when restoring a pre-built schema (e.g. a data
+    # move), since goose would re-run non-idempotent ALTER migrations and fail.
+    - name: Run database migrations (idempotent goose up)
+      become_user: "{{ munin_user }}"
+      ansible.builtin.command:
+        cmd: "podman run --rm --pull=always --env-file {{ munin_home }}/.config/muninid/muninid.env {{ muninid_image }} /app/muninid-migrate up"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ munin_uid }}"
+      changed_when: false
+      when: run_migrate | default(true) | bool
+      tags: [muninid]
+
+    - name: Reload rootless systemd so quadlets are picked up
+      become_user: "{{ munin_user }}"
+      ansible.builtin.systemd_service:
+        scope: user
+        daemon_reload: true
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ munin_uid }}"
+      tags: [muninid]
+
+    - name: Start muninid pod + containers (rootless user services)
+      become_user: "{{ munin_user }}"
+      ansible.builtin.systemd_service:
+        scope: user
+        name: "{{ item }}"
+        state: started
+      loop:
+        - muninid-pod.service
+        - muninid.service
+        - anubis.service
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ munin_uid }}"
+      tags: [muninid]
+
+    # ------------------------------------------------------- go53 demo ------
+    - name: Check whether the go53 demo pod already exists (root podman)
+      ansible.builtin.command: podman pod exists go53-demo
+      register: demo_pod
+      failed_when: false
+      changed_when: false
+      tags: [demo]
+
+    - name: Start go53 demo without Caddy (HAProxy fronts demo.go53.eu)
+      ansible.builtin.command: "{{ demo_script }}"
+      environment:
+        SKIP_CADDY: "1"
+        DOMAIN: "{{ demo_domain }}"
+        # Keep the demo pod off 80/443 — those belong to HAProxy now.
+        HTTP_PORT: "127.0.0.1:8081"
+        HTTPS_PORT: "127.0.0.1:8444"
+      when: demo_pod.rc != 0
+      tags: [demo]

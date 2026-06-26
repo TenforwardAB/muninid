@@ -1,0 +1,40 @@
+---
+# Non-secret configuration. Secrets live in vars/secrets.yml (gitignored).
+
+# Rootless podman user that runs the muninid pod
+munin_user: podman_munin
+munin_home: "/home/{{ munin_user }}"
+munin_subid_start: 200000
+munin_subid_count: 65536
+
+# Container images
+muninid_image: "ghcr.io/tenforwardab/muninid:latest"
+# NOTE: verify the Anubis policy schema below matches this image version.
+anubis_image: "ghcr.io/techarohq/anubis:latest"
+
+# Public host
+public_ip: "212.147.245.131"
+
+# Domains terminated by HAProxy
+idp_domain: "idp.solutrix.io"
+demo_domain: "demo.go53.eu"
+letsencrypt_email: "andre@tenforward.se"
+
+# muninid runtime
+muninid_issuer: "https://{{ idp_domain }}"
+muninid_port: 8080
+
+# Anubis (mild bot-wall) — only challenges /interaction
+anubis_port: 8923
+anubis_difficulty: 3
+
+# go53 demo (existing /root/install_demo.sh) — fronted by HAProxy, no Caddy
+demo_script: "/root/install_demo.sh"
+demo_webadmin_port: 3000
+
+# HAProxy per-source-IP rate limits (requests per 10s window)
+rl_global_per_10s: 100        # hard cap across all paths/hosts
+rl_interaction_per_10s: 20    # stricter cap on the /interaction login pages
+
+# certbot HTTP-01 challenge port that HAProxy proxies to (standalone)
+acme_http01_port: 8888

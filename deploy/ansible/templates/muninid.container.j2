@@ -1,0 +1,17 @@
+[Unit]
+Description=MuninID OIDC provider
+Requires=muninid-pod.service
+After=muninid-pod.service
+
+[Container]
+Image={{ muninid_image }}
+Pod=muninid.pod
+EnvironmentFile=%h/.config/muninid/muninid.env
+AutoUpdate=registry
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

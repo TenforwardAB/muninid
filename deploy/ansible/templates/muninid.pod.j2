@@ -1,0 +1,8 @@
+[Pod]
+PodName=muninid
+# Published to loopback only — HAProxy proxies from the host edge.
+PublishPort=127.0.0.1:{{ muninid_port }}:{{ muninid_port }}
+PublishPort=127.0.0.1:{{ anubis_port }}:{{ anubis_port }}
+
+[Install]
+WantedBy=default.target
