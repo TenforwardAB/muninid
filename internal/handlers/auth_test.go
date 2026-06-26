@@ -38,7 +38,7 @@ type fakeAuthProvider struct {
 	completeSession string
 	completeErr     error
 
-	completeArgs []string // uid, current, new (nil until CompletePasswordChange is called)
+	completeArgs []string // uid, new password (nil until CompletePasswordChange is called)
 	redirected   string   // sessionID handed to RedirectAfterLogin (empty until called)
 }
 
@@ -65,7 +65,7 @@ func (f *fakeAuthProvider) RedirectAfterLogin(w http.ResponseWriter, _ *http.Req
 }
 
 func (f *fakeAuthProvider) AbortInteraction(http.ResponseWriter, *http.Request, string) {}
-func (f *fakeAuthProvider) ConfirmConsent(http.ResponseWriter, *http.Request, string)  {}
+func (f *fakeAuthProvider) ConfirmConsent(http.ResponseWriter, *http.Request, string)   {}
 
 func newAuthRouter(p authProvider) http.Handler {
 	h := NewAuth(p)

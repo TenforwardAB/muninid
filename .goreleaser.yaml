@@ -1,0 +1,64 @@
+version: 2
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: muninid
+    main: ./cmd/muninid
+    binary: muninid
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+  - id: muninid-migrate
+    main: ./cmd/muninid-migrate
+    binary: muninid-migrate
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  # One archive per platform containing both binaries plus the migrations the
+  # migrate command needs at runtime.
+  - id: muninid
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - migrations/**/*
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+
+release:
+  draft: false
+  prerelease: auto
