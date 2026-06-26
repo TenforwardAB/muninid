@@ -54,6 +54,7 @@ const (
 	codeName                = "AuthorizationCode"
 	sessionName             = "Session"
 	interactionName         = "Interaction"
+	pwChangeName            = "PendingPasswordChange"
 	refreshName             = "RefreshToken"
 	revokedName             = "RevokedToken"
 	tokenExchangeGrant      = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -458,9 +459,47 @@ func (p *Provider) FinishLogin(ctx context.Context, uid, username, password, ip,
 	}
 	_ = p.store.ResetLoginFailures(ctx, ipKey)
 	_ = p.store.ResetLoginFailures(ctx, userKey)
+
+	// Credentials are valid, but WildDuck flagged the password for replacement
+	if boolv(auth["requirePasswordChange"]) {
+		if err := p.store.PutArtifact(ctx, pwChangeName, uid, map[string]any{"sub": account.ID, "email": account.Email}, 10*time.Minute); err != nil {
+			return "", err
+		}
+		return "", ErrPasswordChangeRequired
+	}
+
+	return p.startSession(ctx, account.ID, account.Email), nil
+}
+
+// ErrPasswordChangeRequired signals that authentication was OK but the user
+// must set a new paswsord
+var ErrPasswordChangeRequired = errors.New("password change required")
+
+// startSession stores a login session artifact and returns its id.
+func (p *Provider) startSession(ctx context.Context, sub, email string) string {
 	sessionID := randomID(32)
-	_ = p.store.PutArtifact(ctx, sessionName, sessionID, map[string]any{"sub": account.ID, "email": account.Email}, 24*time.Hour)
-	return sessionID, nil
+	_ = p.store.PutArtifact(ctx, sessionName, sessionID, map[string]any{"sub": sub, "email": email}, 24*time.Hour)
+	return sessionID
+}
+
+// CompletePasswordChange applies a forced password change for the identity held
+// in the pending artifact created by FinishLogin, then starts a session.
+
+func (p *Provider) CompletePasswordChange(ctx context.Context, uid, newPassword string) (string, error) {
+	pending, err := p.store.GetArtifact(ctx, pwChangeName, uid)
+	if err != nil {
+		return "", err
+	}
+	sub := str(pending["sub"])
+	if sub == "" {
+		return "", errors.New("invalid password change request")
+	}
+	res, err := p.wd.Users.Update(ctx, sub, wildduck.M{"password": newPassword})
+	if err != nil || res["success"] != true {
+		return "", errors.New("password change failed")
+	}
+	_ = p.store.DeleteArtifact(ctx, pwChangeName, uid)
+	return p.startSession(ctx, sub, str(pending["email"])), nil
 }
 
 func (p *Provider) RedirectAfterLogin(w http.ResponseWriter, r *http.Request, uid, sessionID string) {
@@ -500,6 +539,16 @@ func (p *Provider) InteractionView(r *http.Request, uid string, errorText string
 			view.Audiences = parseScopes(str(artifact["audience"]))
 		}
 	}
+	return view, nil
+}
+
+// PasswordChangeView renders the forced password-changche form for an interaction
+func (p *Provider) PasswordChangeView(r *http.Request, uid, errorText string) (InteractionView, error) {
+	view, err := p.InteractionView(r, uid, errorText)
+	if err != nil {
+		return InteractionView{}, err
+	}
+	view.Mode = "password"
 	return view, nil
 }
 

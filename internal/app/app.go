@@ -150,6 +150,7 @@ func (a *App) Router() http.Handler {
 	r.Route("/interaction", func(r chi.Router) {
 		r.Get("/{uid}", auth.ShowInteraction)
 		r.Post("/{uid}/login", auth.Login)
+		r.Post("/{uid}/password", auth.ChangePassword)
 		r.Get("/{uid}/abort", auth.Abort)
 		r.Post("/{uid}/abort", auth.Abort)
 		r.Post("/{uid}/confirm", auth.Confirm)
