@@ -14,6 +14,11 @@ anubis_image: "ghcr.io/techarohq/anubis:latest"
 
 # Public host
 public_ip: "212.147.245.131"
+# Network interfaces / internal address. Only 80+443 are exposed on the external
+# interface; everything else is internal-only.
+external_iface: "eth0"
+internal_iface: "eth1"
+internal_ip: "172.31.0.12"
 
 # Domains terminated by HAProxy
 idp_domain: "idp.solutrix.io"
@@ -24,7 +29,14 @@ letsencrypt_email: "andre@tenforward.se"
 muninid_issuer: "https://{{ idp_domain }}"
 muninid_port: 8080
 
-# Anubis (mild bot-wall) — only challenges /interaction
+# Self-service password reset (/forgot, /reset). Sends via the shared WildDuck
+# no-reply user (same instance solutrix-api uses; user = no-reply@solutrix.io).
+reset_token_ttl: "1h"
+reset_sender_user_id: "6831d6b1ac19dd89efe88700"
+reset_sender_address: "no-reply@solutrix.io"
+reset_sender_name: "Solutrix"
+
+# Anubis (mild bot-wall) — challenges /interaction, /forgot, /reset
 anubis_port: 8923
 anubis_difficulty: 3
 
@@ -32,9 +44,9 @@ anubis_difficulty: 3
 demo_script: "/root/install_demo.sh"
 demo_webadmin_port: 3000
 
-# HAProxy per-source-IP rate limits (requests per 10s window)
-rl_global_per_10s: 100        # hard cap across all paths/hosts
-rl_interaction_per_10s: 20    # stricter cap on the /interaction login pages
+# HAProxy per-source-IP rate limits
+rl_global_per_10s: 100        # hard cap across ALL paths (10s window)
+rl_login_post_per_30s: 10     # max login/password POSTs per 30s (page loads don't count)
 
 # certbot HTTP-01 challenge port that HAProxy proxies to (standalone)
 acme_http01_port: 8888

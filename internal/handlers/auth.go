@@ -38,6 +38,12 @@ type authProvider interface {
 	RedirectAfterLogin(w http.ResponseWriter, r *http.Request, uid, sessionID string)
 	AbortInteraction(w http.ResponseWriter, r *http.Request, uid string)
 	ConfirmConsent(w http.ResponseWriter, r *http.Request, uid string)
+
+	// Self-service password reset (see reset.go).
+	BeginPasswordReset(ctx context.Context, login, recoveryEmail, ip string)
+	ResetTokenValid(ctx context.Context, token string) bool
+	CompletePasswordReset(ctx context.Context, token, newPassword string) (string, error)
+	SetSessionCookie(w http.ResponseWriter, sessionID string)
 }
 
 type Auth struct {
@@ -234,6 +240,7 @@ button{width:100%;padding:13px 16px;font-size:1rem;font-weight:700;border:none;b
 <input id="password" type="password" name="password" autocomplete="current-password" required placeholder="Your password" />
 <button class="btn-primary" type="submit">Continue</button>
 </form>
+<p class="muted"><a href="/forgot">Forgot your password?</a></p>
 {{end}}
 <p class="muted">Secured by MuninID</p>
 </main>

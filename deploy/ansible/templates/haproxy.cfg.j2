@@ -34,14 +34,20 @@ frontend fe_https
     http-request set-header X-Forwarded-For %[src]
     http-request set-header X-Real-IP %[src]
 
-    # ---- per-source-IP rate limiting (10s sliding window) ----
+    # ---- coarse per-source-IP request cap (all paths, 10s window) ----
     stick-table type ip size 100k expire 10s store http_req_rate(10s)
     http-request track-sc0 src
-    acl rl_over_global sc_http_req_rate(0) gt {{ rl_global_per_10s }}
-    acl is_interaction path_beg /interaction
-    acl rl_over_login  sc_http_req_rate(0) gt {{ rl_interaction_per_10s }}
-    http-request deny deny_status 429 if rl_over_global
-    http-request deny deny_status 429 if is_interaction rl_over_login
+    http-request deny deny_status 429 if { sc_http_req_rate(0) gt {{ rl_global_per_10s }} }
+
+    # ---- brute-force throttle: counts ONLY credential POSTs ----
+    # Covers login/forced-change (/interaction) plus self-service password reset
+    # (/forgot triggers mail + is a hash-verification oracle; /reset submits a new
+    # password). Page loads and the Anubis challenge are GETs and never count, so
+    # normal use can't trip this. muninid's per-IP/username lockout is the
+    # authoritative layer for login; for reset this edge throttle is the main brake.
+    acl is_authpost path_beg /interaction /forgot /reset
+    http-request track-sc1 src table st_login if METH_POST is_authpost
+    http-request deny deny_status 429 if METH_POST is_authpost { sc_http_req_rate(1) gt {{ rl_login_post_per_30s }} }
 
     # ---- host routing ----
     acl host_idp  hdr(host) -i {{ idp_domain }}
@@ -49,12 +55,17 @@ frontend fe_https
     use_backend be_anubis if host_idp
     use_backend be_demo   if host_demo
 
+# Separate counter for login/password POSTs only (30s window).
+backend st_login
+    stick-table type ip size 100k expire 30s store http_req_rate(30s)
+
 backend be_acme
     server certbot 127.0.0.1:{{ acme_http01_port }}
 
 # All idp.solutrix.io traffic flows through Anubis; its policy only challenges
-# /interaction and lets every other path (OAuth/OIDC/API) straight through to
-# muninid. Health check hits /healthz, which the policy allows.
+# the browser-facing pages (/interaction, /forgot, /reset) and lets every other
+# path (OAuth/OIDC/API) straight through to muninid. Health check hits /healthz,
+# which the policy allows.
 backend be_anubis
     option httpchk GET /healthz
     server anubis 127.0.0.1:{{ anubis_port }} check

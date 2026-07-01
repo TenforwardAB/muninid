@@ -49,6 +49,15 @@ type Config struct {
 	CodeTTL               time.Duration
 	RefreshTokenTTL       time.Duration
 
+	// Self-service password reset. PublicBaseURL is where reset links point
+	// (defaults to Issuer). The sender identity is a WildDuck user the mailer
+	// submits as.
+	PublicBaseURL      string
+	ResetTokenTTL      time.Duration
+	ResetSenderUserID  string
+	ResetSenderAddress string
+	ResetSenderName    string
+
 	// Authorization (PDP) backend. See docs/authz-contract.md.
 	AuthzBackend         string // "claims" (default) | "solutrix"
 	AuthzAdminRoles      []string
@@ -87,11 +96,19 @@ func Load() (Config, error) {
 		SolutrixClientID:      os.Getenv("SOLUTRIX_CLIENT_ID"),
 		SolutrixClientSecret:  os.Getenv("SOLUTRIX_CLIENT_SECRET"),
 		SolutrixScope:         os.Getenv("SOLUTRIX_SCOPE"),
+		PublicBaseURL:         os.Getenv("PUBLIC_BASE_URL"),
+		ResetTokenTTL:         parseDuration(os.Getenv("RESET_TOKEN_TTL"), time.Hour),
+		ResetSenderUserID:     os.Getenv("RESET_SENDER_USER_ID"),
+		ResetSenderAddress:    env("RESET_SENDER_ADDRESS", "no-reply@solutrix.io"),
+		ResetSenderName:       env("RESET_SENDER_NAME", "Solutrix"),
 	}
 	cfg.CORSOrigins = splitCSV(os.Getenv("CORS_ORIGINS"))
 	cfg.CookieKeys = splitCSV(os.Getenv("OIDC_COOKIE_KEYS"))
 	if cfg.Issuer == "" {
 		cfg.Issuer = fmt.Sprintf("http://localhost:%s", cfg.Port)
+	}
+	if cfg.PublicBaseURL == "" {
+		cfg.PublicBaseURL = cfg.Issuer
 	}
 	if len(cfg.CookieKeys) < 1 {
 		return cfg, errors.New("OIDC_COOKIE_KEYS must contain at least one secret")

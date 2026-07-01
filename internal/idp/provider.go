@@ -43,6 +43,7 @@ import (
 	"github.com/ory/fosite/token/jwt"
 	wildduck "github.com/tenforwardab/wildduck-gosdk"
 
+	"github.com/tenforwardab/muninid/internal/authn"
 	"github.com/tenforwardab/muninid/internal/config"
 	"github.com/tenforwardab/muninid/internal/fositestore"
 	"github.com/tenforwardab/muninid/internal/secret"
@@ -55,6 +56,7 @@ const (
 	sessionName             = "Session"
 	interactionName         = "Interaction"
 	pwChangeName            = "PendingPasswordChange"
+	pwResetName             = "PendingPasswordReset"
 	refreshName             = "RefreshToken"
 	revokedName             = "RevokedToken"
 	tokenExchangeGrant      = "urn:ietf:params:oauth:grant-type:token-exchange"
@@ -77,6 +79,8 @@ type Provider struct {
 	store   *store.Store
 	secrets *secret.Store
 	wd      *wildduck.Client
+	backend authn.IdentityBackend
+	mailer  authn.Mailer
 	key     *rsa.PrivateKey
 	keyID   string
 	fstore  *fositestore.Store
@@ -107,8 +111,8 @@ type Account struct {
 	InternalData map[string]any `json:"internalData"`
 }
 
-func New(ctx context.Context, cfg config.Config, st *store.Store, fst *fositestore.Store, wd *wildduck.Client) (*Provider, error) {
-	p := &Provider{cfg: cfg, store: st, secrets: secret.New(cfg.SecretKey), wd: wd}
+func New(ctx context.Context, cfg config.Config, st *store.Store, fst *fositestore.Store, wd *wildduck.Client, backend authn.IdentityBackend, mailer authn.Mailer) (*Provider, error) {
+	p := &Provider{cfg: cfg, store: st, secrets: secret.New(cfg.SecretKey), wd: wd, backend: backend, mailer: mailer}
 	if err := p.loadSigningKey(ctx); err != nil {
 		return nil, err
 	}
@@ -500,6 +504,88 @@ func (p *Provider) CompletePasswordChange(ctx context.Context, uid, newPassword 
 	}
 	_ = p.store.DeleteArtifact(ctx, pwChangeName, uid)
 	return p.startSession(ctx, sub, str(pending["email"])), nil
+}
+
+// BeginPasswordReset verifies a recovery destination for the given login and, on
+// a match, stores a single-use token and mails a reset link to the verified
+// address. It never signals whether the account or destination existed — the
+// handler always shows the same generic confirmation — so this returns nothing.
+//
+// For accounts whose only recovery record is a hashed signup contact email, the
+// user-supplied address is verified against the hash and then used as the send
+// target; we never needed the plaintext stored.
+func (p *Provider) BeginPasswordReset(ctx context.Context, login, recoveryEmail, ip string) {
+	login = strings.TrimSpace(strings.ToLower(login))
+	recoveryEmail = strings.TrimSpace(strings.ToLower(recoveryEmail))
+	if login == "" || recoveryEmail == "" || p.backend == nil || p.mailer == nil {
+		return
+	}
+	acc, ok, err := p.backend.FindByLogin(ctx, login)
+	if err != nil || !ok || !acc.Usable() {
+		return
+	}
+	dests, err := p.backend.RecoveryDestinations(ctx, acc)
+	if err != nil || !destinationMatches(dests, recoveryEmail) {
+		return
+	}
+	token := randomID(32)
+	if err := p.store.PutArtifact(ctx, pwResetName, token,
+		map[string]any{"sub": acc.ID, "email": recoveryEmail}, p.cfg.ResetTokenTTL); err != nil {
+		return
+	}
+	link := strings.TrimRight(p.cfg.PublicBaseURL, "/") + "/reset?token=" + url.QueryEscape(token)
+	_ = p.mailer.SendPasswordReset(ctx, recoveryEmail, acc.Name, link)
+}
+
+// destinationMatches reports whether the user-supplied email matches any known
+// recovery destination — either a plaintext address or the sha256 (lower-hex) of
+// the signup contact email.
+func destinationMatches(dests []authn.Destination, email string) bool {
+	sum := sha256.Sum256([]byte(email))
+	h := hex.EncodeToString(sum[:])
+	for _, d := range dests {
+		if d.Address != "" && strings.EqualFold(d.Address, email) {
+			return true
+		}
+		if d.Hash != "" && strings.EqualFold(d.Hash, h) {
+			return true
+		}
+	}
+	return false
+}
+
+// ResetTokenValid reports whether a reset token exists and is unexpired, so the
+// handler can show a friendly message instead of a form that will fail.
+func (p *Provider) ResetTokenValid(ctx context.Context, token string) bool {
+	if token == "" {
+		return false
+	}
+	_, err := p.store.GetArtifact(ctx, pwResetName, token)
+	return err == nil
+}
+
+// CompletePasswordReset consumes a reset token, sets the new password via the
+// identity backend, and starts a session (so the user is signed in on success).
+func (p *Provider) CompletePasswordReset(ctx context.Context, token, newPassword string) (string, error) {
+	pending, err := p.store.GetArtifact(ctx, pwResetName, token)
+	if err != nil {
+		return "", errors.New("invalid or expired reset link")
+	}
+	sub := str(pending["sub"])
+	if sub == "" {
+		return "", errors.New("invalid reset request")
+	}
+	if err := p.backend.SetPassword(ctx, sub, newPassword); err != nil {
+		return "", errors.New("password change failed")
+	}
+	_ = p.store.DeleteArtifact(ctx, pwResetName, token)
+	return p.startSession(ctx, sub, str(pending["email"])), nil
+}
+
+// SetSessionCookie writes the signed session cookie. Used by the password-reset
+// flow, which establishes a session outside any OAuth interaction context.
+func (p *Provider) SetSessionCookie(w http.ResponseWriter, sessionID string) {
+	http.SetCookie(w, p.signedCookie(sessionCookie, sessionID, 24*time.Hour))
 }
 
 func (p *Provider) RedirectAfterLogin(w http.ResponseWriter, r *http.Request, uid, sessionID string) {

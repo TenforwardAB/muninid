@@ -1,15 +1,16 @@
 # Mild Anubis policy for MuninID.
 #
 # Anubis fronts ALL idp.solutrix.io traffic, but we only want a proof-of-work
-# challenge on the interactive login pages — never on machine-to-machine OAuth/
-# OIDC/API calls (those clients can't solve a PoW). Go's RE2 has no lookahead,
-# so we rely on first-match-wins ordering: challenge /interaction, allow the rest.
+# challenge on the interactive, browser-facing pages (login + self-service
+# password reset) — never on machine-to-machine OAuth/OIDC/API calls (those
+# clients can't solve a PoW). Go's RE2 has no lookahead, so we rely on
+# first-match-wins ordering: challenge /interaction|/forgot|/reset, allow the rest.
 #
 # NOTE: this targets the action-based policy schema (ALLOW/CHALLENGE). Verify it
 # against the pinned Anubis image version; newer releases may use weights.
 bots:
   - name: challenge-login
-    path_regex: ^/interaction
+    path_regex: ^/(interaction|forgot|reset)
     action: CHALLENGE
 
   - name: allow-everything-else

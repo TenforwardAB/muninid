@@ -34,11 +34,13 @@ import (
 	wildduck "github.com/tenforwardab/wildduck-gosdk"
 
 	"github.com/tenforwardab/muninid/internal/authz"
+	wdbackend "github.com/tenforwardab/muninid/internal/backend/wildduck"
 	"github.com/tenforwardab/muninid/internal/config"
 	"github.com/tenforwardab/muninid/internal/fositestore"
 	"github.com/tenforwardab/muninid/internal/handlers"
 	"github.com/tenforwardab/muninid/internal/idp"
 	"github.com/tenforwardab/muninid/internal/kv"
+	"github.com/tenforwardab/muninid/internal/mail/wildduckmailer"
 	"github.com/tenforwardab/muninid/internal/secret"
 	"github.com/tenforwardab/muninid/internal/store"
 )
@@ -76,7 +78,11 @@ func New(ctx context.Context, cfg config.Config) (*App, error) {
 	st := store.New(db, cache)
 	fst := fositestore.New(db, cache, secret.New(cfg.SecretKey), cfg.RefreshTokenTTL)
 	wd := wildduck.New(cfg.WildDuckToken, cfg.WildDuckURL)
-	provider, err := idp.New(ctx, cfg, st, fst, wd)
+	// WildDuck as one implementation of the backend-neutral authn ports. Swap
+	// these two lines to move muninid onto a different backend/mailer later.
+	backend := wdbackend.NewBackend(wd)
+	mailer := wildduckmailer.New(wd, cfg.ResetSenderUserID, cfg.ResetSenderAddress, cfg.ResetSenderName)
+	provider, err := idp.New(ctx, cfg, st, fst, wd, backend, mailer)
 	if err != nil {
 		_ = cache.Close()
 		db.Close()
@@ -155,6 +161,12 @@ func (a *App) Router() http.Handler {
 		r.Post("/{uid}/abort", auth.Abort)
 		r.Post("/{uid}/confirm", auth.Confirm)
 	})
+
+	// Self-service password reset (public, no OAuth interaction context).
+	r.Get("/forgot", auth.ForgotForm)
+	r.Post("/forgot", auth.ForgotSubmit)
+	r.Get("/reset", auth.ResetForm)
+	r.Post("/reset", auth.ResetSubmit)
 
 	r.Route("/api/global/admin", func(r chi.Router) {
 		r.Use(a.requireAdminAPIKey)

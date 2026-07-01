@@ -26,6 +26,18 @@
         name: haproxy
         state: reloaded
 
+    - name: restart muninid stack
+      become_user: "{{ munin_user }}"
+      ansible.builtin.systemd_service:
+        scope: user
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - muninid.service
+        - anubis.service
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ munin_uid }}"
+
   tasks:
     # ------------------------------------------------------------- packages
     - name: Install base packages
@@ -229,6 +241,7 @@
         owner: "{{ munin_user }}"
         group: "{{ munin_user }}"
         mode: "0600"
+      notify: restart muninid stack
       tags: [muninid]
 
     - name: Write Anubis policy
@@ -304,5 +317,49 @@
         # Keep the demo pod off 80/443 — those belong to HAProxy now.
         HTTP_PORT: "127.0.0.1:8081"
         HTTPS_PORT: "127.0.0.1:8444"
+        # Bind the demo DNS to the internal IP only (not 0.0.0.0) so it is never
+        # reachable from the internet. Podman-published ports bypass ufw, so this
+        # bind is the real control.
+        DNS_PORT: "{{ internal_ip }}:2053"
       when: demo_pod.rc != 0
       tags: [demo]
+
+    # ----------------------------------------------------- host firewall ----
+    # Only 80 + 443 on the external interface; everything else internal-only.
+    - name: Allow forwarding so rootful podman containers keep networking
+      ansible.builtin.lineinfile:
+        path: /etc/default/ufw
+        regexp: '^DEFAULT_FORWARD_POLICY='
+        line: 'DEFAULT_FORWARD_POLICY="ACCEPT"'
+      tags: [firewall]
+
+    - name: ufw defaults (deny incoming, allow outgoing)
+      ansible.builtin.command: "ufw --force default {{ item }}"
+      loop:
+        - deny incoming
+        - allow outgoing
+      changed_when: false
+      tags: [firewall]
+
+    - name: ufw — allow everything on the internal interface (mgmt + internal svc)
+      ansible.builtin.command: "ufw allow in on {{ internal_iface }}"
+      changed_when: false
+      tags: [firewall]
+
+    - name: ufw — allow container bridge (rootful podman)
+      ansible.builtin.command: "ufw allow in on podman0"
+      changed_when: false
+      tags: [firewall]
+
+    - name: ufw — expose ONLY 80 + 443 on the external interface
+      ansible.builtin.command: "ufw allow in on {{ external_iface }} to any port {{ item }} proto tcp"
+      loop:
+        - 80
+        - 443
+      changed_when: false
+      tags: [firewall]
+
+    - name: Enable ufw
+      ansible.builtin.command: "ufw --force enable"
+      changed_when: false
+      tags: [firewall]

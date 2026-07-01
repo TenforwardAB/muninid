@@ -67,6 +67,14 @@ func (f *fakeAuthProvider) RedirectAfterLogin(w http.ResponseWriter, _ *http.Req
 func (f *fakeAuthProvider) AbortInteraction(http.ResponseWriter, *http.Request, string) {}
 func (f *fakeAuthProvider) ConfirmConsent(http.ResponseWriter, *http.Request, string)   {}
 
+func (f *fakeAuthProvider) BeginPasswordReset(context.Context, string, string, string) {}
+func (f *fakeAuthProvider) ResetTokenValid(context.Context, string) bool               { return true }
+func (f *fakeAuthProvider) CompletePasswordReset(_ context.Context, token, next string) (string, error) {
+	f.completeArgs = []string{token, next}
+	return f.completeSession, f.completeErr
+}
+func (f *fakeAuthProvider) SetSessionCookie(http.ResponseWriter, string) {}
+
 func newAuthRouter(p authProvider) http.Handler {
 	h := NewAuth(p)
 	r := chi.NewRouter()
